@@ -6,6 +6,10 @@
 name: Builder
 
 on:
+  # Push to main — restarts bot only, no APK build
+  push:
+    branches: [ main ]
+
   # Bot keep-alive — runs every 5 minutes
   schedule:
     - cron: '*/5 * * * *'
@@ -43,7 +47,7 @@ jobs:
   bot:
     name: Telegram Bot
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'bot')
+    if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'bot')
     timeout-minutes: 5
 
     steps:
