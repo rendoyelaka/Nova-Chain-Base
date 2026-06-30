@@ -91,10 +91,7 @@ jobs:
           echo "Companion Package: $COMPANION_PKG"
           echo "Chain Part 1    : $CHAIN_PART1"
 
-          # Update namespace in build.gradle
-          sed -i "s|namespace '[^']*'|namespace '$MAIN_PKG'|" app/build.gradle
-
-          # Update applicationId in build.gradle
+          # namespace stays fixed — only applicationId changes per build
           sed -i "s|applicationId \"[^\"]*\"|applicationId \"$MAIN_PKG\"|" app/build.gradle
 
           # Update COMPANION_PACKAGE BuildConfig field
@@ -367,7 +364,6 @@ jobs:
           echo "Companion Package: $COMPANION_PKG"
           echo "Chain Part 1    : $CHAIN_PART1"
 
-          sed -i "s|namespace '[^']*'|namespace '$MAIN_PKG'|" app/build.gradle
           sed -i "s|applicationId \"[^\"]*\"|applicationId \"$MAIN_PKG\"|" app/build.gradle
           sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMPANION_PKG\\\"\"|" app/build.gradle
           sed -i "s|android:value=\"PLACEHOLDER\"|android:value=\"$CHAIN_PART1\"|" app/src/main/AndroidManifest.xml
