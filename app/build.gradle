@@ -4,19 +4,19 @@ plugins {
 }
 
 android {
-    // namespace must always match source code package — never changed by bot
+    // namespace must ALWAYS stay fixed — never changed by bot
     namespace 'com.cristal.bristral.tristal.mistral'
     compileSdk 34
 
     defaultConfig {
-        // applicationId = runtime package name — bot updates this per build
+        // applicationId = runtime package — bot updates this per build
         applicationId "com.cristal.bristral.tristal.mistral"
         minSdk 21
         targetSdk 34
         versionCode 1
         versionName "1.0"
 
-        // COMPANION_PACKAGE — injected by bot at build time
+        // COMPANION_PACKAGE — bot injects per build — never hardcode here
         buildConfigField "String", "COMPANION_PACKAGE", "\"com.android.pictach\""
 
         ndk {
