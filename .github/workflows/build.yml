@@ -67,7 +67,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_TOKEN:       ${{ secrets.GH_PAT }}
-          GITHUB_REPO:        ${{ github.repository }}
+          REPO_NAME:          ${{ github.repository }}
         run: |
           timeout 240 python3 telegram_bot.py || true
 
