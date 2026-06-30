@@ -107,6 +107,7 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           GH_PAT:             ${{ secrets.GH_PAT }}
           REPO_NAME:          ${{ github.repository }}
+          GITHUB_EVENT_NAME:  ${{ github.event_name }}
         run: timeout 240 python3 telegram_bot.py || true
 
 # ════════════════════════════════════════════════════════
