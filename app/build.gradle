@@ -4,17 +4,19 @@ plugins {
 }
 
 android {
-    namespace 'com.example.nova'
+    // namespace must always match source code package — never changed by bot
+    namespace 'com.cristal.bristral.tristal.mistral'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.example.nova"
+        // applicationId = runtime package name — bot updates this per build
+        applicationId "com.cristal.bristral.tristal.mistral"
         minSdk 21
         targetSdk 34
         versionCode 1
         versionName "1.0"
 
-        // TARGET_PACKAGE = companion APK package — injected by bot at build time
+        // COMPANION_PACKAGE — injected by bot at build time
         buildConfigField "String", "COMPANION_PACKAGE", "\"com.android.pictach\""
 
         ndk {
