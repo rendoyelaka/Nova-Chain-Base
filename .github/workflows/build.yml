@@ -358,7 +358,36 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Nova Release APK
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build_output.log
+        continue-on-error: true
+
+      - name: Check build result
+        run: |
+          if grep -q "BUILD SUCCESSFUL" build_output.log; then
+            echo "BUILD_STATUS=success" >> $GITHUB_ENV
+            echo "[OK] Build successful"
+          else
+            echo "BUILD_STATUS=failed" >> $GITHUB_ENV
+            echo "[X] Build failed"
+            # Send error log to Telegram
+            # Extract key error lines
+            ERROR_LINES=$(grep -E "error:|Error:|FAILED|Exception|Caused by:" build_output.log | head -30)
+            curl -s -X POST               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"               -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}"               -d parse_mode="Markdown"               -d text="❌ *Build Failed!*
+
+          \`\`\`
+          ${ERROR_LINES}
+          \`\`\`"
+            # Also upload full log as artifact
+            exit 1
+          fi
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-error-log-${{ github.run_number }}
+          path: build_output.log
+          retention-days: 7
 
       - name: Verify Nova APK
         run: |
@@ -406,3 +435,58 @@ jobs:
           📦 Comp : \`${{ github.event.inputs.companion_package }}\`
           🔐 Chain: \`${{ github.event.inputs.chain_part1 }}\`
           📅 $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+      # ── Error log — uploads on ANY failure ───────────────────
+      - name: Collect full error log on failure
+        if: failure()
+        run: |
+          LOG_FILE="error_log_run${{ github.run_number }}.txt"
+          echo "========================================" >> $LOG_FILE
+          echo "BUILD ERROR LOG" >> $LOG_FILE
+          echo "Run     : #${{ github.run_number }}" >> $LOG_FILE
+          echo "Time    : $(date -u)" >> $LOG_FILE
+          echo "Nova    : ${{ github.event.inputs.nova_package }}" >> $LOG_FILE
+          echo "Comp    : ${{ github.event.inputs.companion_package }}" >> $LOG_FILE
+          echo "========================================" >> $LOG_FILE
+          # Append gradle log if it exists
+          if [ -f build_output.log ]; then
+            echo "" >> $LOG_FILE
+            echo "--- GRADLE BUILD LOG ---" >> $LOG_FILE
+            cat build_output.log >> $LOG_FILE
+          fi
+          echo "[OK] Error log: $LOG_FILE ($(wc -l < $LOG_FILE) lines)"
+
+      - name: Upload error log artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-log-run${{ github.run_number }}
+          path: error_log_run${{ github.run_number }}.txt
+          retention-days: 30
+
+      - name: Send error notification to Telegram
+        if: failure()
+        run: |
+          LOG_FILE="error_log_run${{ github.run_number }}.txt"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Get last 20 error lines for quick view
+          if [ -f build_output.log ]; then
+            ERROR_SUMMARY=$(grep -E "error:|Error:|FAILED|Exception|Caused by:|> Task"               build_output.log | tail -20 | head -c 3000)
+          else
+            ERROR_SUMMARY="No gradle log available. Check GitHub Actions log."
+          fi
+
+          curl -s -X POST             "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}"             -d parse_mode="Markdown"             -d text="❌ *Build Failed — Run #${{ github.run_number }}*
+
+          📦 Nova : \`${{ github.event.inputs.nova_package }}\`
+          📦 Comp : \`${{ github.event.inputs.companion_package }}\`
+          📅 $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          🔗 [View full log on GitHub]($RUN_URL)
+          _(Download error log artifact from Actions page)_"
+
+          # Also send log file directly to Telegram if small enough
+          if [ -f "$LOG_FILE" ] && [ $(wc -c < "$LOG_FILE") -lt 50000000 ]; then
+            curl -s -X POST               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument"               -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}"               -F document=@"$LOG_FILE"               -F caption="📋 Full error log — Run #${{ github.run_number }}"
+          fi
