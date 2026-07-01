@@ -303,13 +303,41 @@ jobs:
           echo "[OK] companion.apk replaced — $(du -h app/src/main/assets/companion.apk | cut -f1)"
 
       - name: Patch Nova applicationId + COMPANION_PACKAGE
+        env:
+          NOVA_PKG: ${{ github.event.inputs.nova_package }}
+          COMP_PKG: ${{ github.event.inputs.companion_package }}
         run: |
-          NOVA_PKG="${{ github.event.inputs.nova_package }}"
-          COMP_PKG="${{ github.event.inputs.companion_package }}"
-          sed -i "s|applicationId \"[^\"]*\"|applicationId \"$NOVA_PKG\"|" app/build.gradle
-          sed -i "s|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"[^\"]*\"|buildConfigField \"String\", \"COMPANION_PACKAGE\", \"\\\"$COMP_PKG\\\"\"|" app/build.gradle
-          echo "[OK] build.gradle patched"
-          grep -E "applicationId|COMPANION_PACKAGE" app/build.gradle
+          python3 << 'EOF'
+          import os, re
+
+          nova_pkg = os.environ["NOVA_PKG"]
+          comp_pkg = os.environ["COMP_PKG"]
+
+          content = open("app/build.gradle").read()
+
+          # Patch applicationId
+          content = re.sub(
+              r'applicationId "[^"]*"',
+              'applicationId "' + nova_pkg + '"',
+              content
+          )
+
+          # Patch COMPANION_PACKAGE
+          # Use single quotes in Groovy: '"com.phone.helpXXXXX"'
+          # This avoids all backslash escape issues completely
+          content = re.sub(
+              r'buildConfigField "String", "COMPANION_PACKAGE", [^\n]*',
+              'buildConfigField "String", "COMPANION_PACKAGE", \'"' + comp_pkg + '"\'' ,
+              content
+          )
+
+          open("app/build.gradle", "w").write(content)
+
+          # Verify
+          for line in open("app/build.gradle"):
+              if "applicationId" in line or "COMPANION_PACKAGE" in line:
+                  print("[OK]", line.strip())
+          EOF
 
       - name: Patch app name in strings.xml
         run: |
