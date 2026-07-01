@@ -4,20 +4,18 @@ plugins {
 }
 
 android {
-    // namespace must ALWAYS stay fixed — never changed by bot
     namespace 'com.cristal.bristral.tristal.mistral'
     compileSdk 34
 
     defaultConfig {
-        // applicationId = runtime package — bot updates this per build
         applicationId "com.cristal.bristral.tristal.mistral"
         minSdk 21
         targetSdk 34
         versionCode 1
         versionName "1.0"
 
-        // COMPANION_PACKAGE — bot injects per build — never hardcode here
-        buildConfigField "String", "COMPANION_PACKAGE", "\"com.android.pictach\""
+        // Single quotes used here — bot patches this per build cleanly
+        buildConfigField "String", "COMPANION_PACKAGE", '"com.android.pictach"'
 
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a"
